@@ -13,15 +13,18 @@ st.set_page_config(
 
 # Constants and paths
 MODELS_DIR = Path("Models")  # Path to models directory
+FACES_DIR = Path("images")   # Path to faces directory
 
 # Cache model loading to avoid reloading on every rerun
 @st.cache_resource
 def load_face_recognition_models():
     # Load face cascade for KNN-based recognition
-    face_cascade = cv2.CascadeClassifier(str(MODELS_DIR / "haarcascade_frontalface_alt.xml"))
+    # Use the built-in haarcascade file that comes with OpenCV
+    cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+    face_cascade = cv2.CascadeClassifier(cascade_path)
     if face_cascade.empty():
-        # Try default model
-        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+        st.error(f"Failed to load face cascade classifier from {cascade_path}")
+        return None
     return face_cascade
 
 @st.cache_resource
@@ -163,21 +166,25 @@ def load_face_data(dataset_path):
     names = {}
     
     try:
-        for fx in os.listdir(dataset_path):
-            if fx.endswith('.npy'):
-                names[class_id] = fx[:-4]
-                data_item = np.load(os.path.join(dataset_path, fx))
-                
-                # Ensure consistent dimensions by flattening face samples
-                if data_item.ndim == 4:  # If shape is (samples, height, width, channels)
-                    samples = data_item.shape[0]
-                    data_item = data_item.reshape(samples, -1)  # Flatten each face sample
-                    
-                face_data.append(data_item)
-                
-                target = class_id * np.ones((data_item.shape[0],))
-                class_id += 1
-                labels.append(target)
+        # Check both the old Models directory and new images directory
+        for directory in [Path("Models"), Path("images")]:
+            if directory.exists():
+                # First load .npy files
+                for fx in os.listdir(directory):
+                    if fx.endswith('.npy'):
+                        names[class_id] = fx[:-4]
+                        data_item = np.load(os.path.join(directory, fx))
+                        
+                        # Ensure consistent dimensions by flattening face samples
+                        if data_item.ndim == 4:  # If shape is (samples, height, width, channels)
+                            samples = data_item.shape[0]
+                            data_item = data_item.reshape(samples, -1)  # Flatten each face sample
+                            
+                        face_data.append(data_item)
+                        
+                        target = class_id * np.ones((data_item.shape[0],))
+                        class_id += 1
+                        labels.append(target)
         
         if face_data:
             # Now all arrays should have consistent dimensions
@@ -198,8 +205,8 @@ def collect_face_data(name):
     face_cascade = load_face_recognition_models()
     
     # Create directory if it doesn't exist
-    dataset_path = Path("Models")
-    dataset_path.mkdir(exist_ok=True)
+    faces_dir = Path("images")
+    faces_dir.mkdir(exist_ok=True)
     
     # For storing face data
     face_data = []
@@ -247,7 +254,7 @@ def collect_face_data(name):
             except Exception as e:
                 st.warning(f"Could not process face: {e}")
         
-        # Display the frame - fix deprecated parameter
+        # Display the frame
         frame_placeholder.image(frame, channels="BGR", use_container_width=True)
         
         # Break if we've collected enough samples
@@ -263,11 +270,82 @@ def collect_face_data(name):
     if face_data:
         # Convert to numpy array and save - store as 2D array (samples, flattened_pixels)
         face_data = np.array(face_data)
-        file_path = dataset_path / f"{name}.npy"
+        file_path = faces_dir / f"{name}.npy"
         np.save(str(file_path), face_data)
         st.success(f"Face data for {name} saved successfully!")
     else:
         st.error("No face data collected.")
+
+def process_image_for_face_recognition(image_path, face_cascade):
+    """Process a single image to extract face data"""
+    try:
+        # Read the image
+        img = cv2.imread(str(image_path))
+        if img is None:
+            return None
+        
+        # Convert to grayscale
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        
+        # Detect faces
+        faces = face_cascade.detectMultiScale(gray, 1.3, 5)
+        
+        face_data = []
+        for (x, y, w, h) in faces:
+            # Extract face
+            offset = 10
+            face_section = img[y-offset:y+h+offset, x-offset:x+w+offset]
+            try:
+                face_section = cv2.resize(face_section, (100, 100))
+                face_data.append(face_section.flatten())
+            except Exception as e:
+                st.warning(f"Could not process face in {image_path.name}: {e}")
+        
+        return np.array(face_data) if face_data else None
+    except Exception as e:
+        st.error(f"Error processing image {image_path.name}: {e}")
+        return None
+
+def load_images_from_directory():
+    """Load and process images from the images directory"""
+    st.subheader("Load Images for Face Recognition")
+    
+    # Create directory if it doesn't exist
+    faces_dir = Path("images")
+    faces_dir.mkdir(exist_ok=True)
+    
+    # Get list of JPG images
+    image_files = list(faces_dir.glob("*.jpg")) + list(faces_dir.glob("*.jpeg"))
+    
+    if not image_files:
+        st.warning("No JPG images found in the images directory.")
+        return
+    
+    # Load face cascade
+    face_cascade = load_face_recognition_models()
+    
+    # Create progress bar
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    # Process each image
+    for i, image_path in enumerate(image_files):
+        status_text.text(f"Processing image {i+1}/{len(image_files)}: {image_path.name}")
+        
+        # Process the image
+        face_data = process_image_for_face_recognition(image_path, face_cascade)
+        
+        if face_data is not None and len(face_data) > 0:
+            # Save face data
+            name = image_path.stem  # Get filename without extension
+            np.save(str(faces_dir / f"{name}.npy"), face_data)
+            st.success(f"Successfully processed {image_path.name}")
+        
+        # Update progress
+        progress_bar.progress((i + 1) / len(image_files))
+    
+    status_text.text("Image processing complete!")
+    st.success(f"Processed {len(image_files)} images")
 
 # Main App UI
 def main():
@@ -276,7 +354,7 @@ def main():
     # Sidebar for app navigation
     app_mode = st.sidebar.selectbox(
         "Choose the app mode",
-        ["About", "Age & Gender Detection", "Face Recognition", "Add New Face"]
+        ["About", "Age & Gender Detection", "Face Recognition", "Add New Face", "Load Images"]
     )
     
     # About page
@@ -290,6 +368,7 @@ def main():
         - **Age & Gender Detection**: Detect faces and predict age and gender
         - **Face Recognition**: Recognize known faces using a KNN algorithm
         - **Add New Face**: Add your face to the recognition database
+        - **Load Images**: Process JPG images for face recognition
         
         ### Implementation
         The app uses:
@@ -332,7 +411,7 @@ def main():
                     if face_boxes:
                         result_img = predict_age_gender(frame, face_boxes, age_net, gender_net)
                     
-                    # Display the result - fix deprecated parameter
+                    # Display the result
                     video_placeholder.image(result_img, channels="BGR", use_container_width=True)
                 
                 # Release resources when stopped
@@ -353,7 +432,7 @@ def main():
         trainset, names = load_face_data(dataset_path)
         
         if len(names) == 0:
-            st.warning("No face data found. Please add faces using the 'Add New Face' option.")
+            st.warning("No face data found. Please add faces using the 'Add New Face' option or load images using the 'Load Images' option.")
         else:
             st.success(f"Loaded {len(names)} faces: {', '.join(names.values())}")
             
@@ -375,7 +454,7 @@ def main():
                     # Detect and recognize faces
                     result_img = detect_and_recognize_faces(frame, face_cascade, trainset, names)
                     
-                    # Display the result - fix deprecated parameter
+                    # Display the result
                     video_placeholder.image(result_img, channels="BGR", use_container_width=True)
                 
                 # Release resources when stopped
@@ -391,6 +470,20 @@ def main():
         if name:
             if st.button("Start Collecting Face Data"):
                 collect_face_data(name)
+    
+    # Load Images mode
+    elif app_mode == "Load Images":
+        st.header("Load Images for Face Recognition")
+        
+        st.markdown("""
+        ### Instructions
+        1. Place JPG images in the `images` directory
+        2. Each image should contain clear faces
+        3. Click the button below to process the images
+        """)
+        
+        if st.button("Process Images"):
+            load_images_from_directory()
 
 if __name__ == "__main__":
     main() 
